@@ -15,21 +15,21 @@
 
 (ns cognitect.http-client
   (:require
-   [clojure.core.async :refer (put!) :as a])
+   [clojure.core.async :refer (put!) :as a]
+   [clojure.java.io :as io])
   (:import
    [java.net SocketTimeoutException UnknownHostException ConnectException]
    [java.io EOFException]
    [java.nio ByteBuffer]
    [java.util.concurrent RejectedExecutionException TimeUnit TimeoutException]
-   [org.eclipse.jetty.client HttpClient Socks4Proxy]
-   [org.eclipse.jetty.client.api Request Response Result
-                                 Response$CompleteListener Response$HeadersListener Response$ContentListener
-                                 Response$FailureListener]
-   [org.eclipse.jetty.client.http HttpClientTransportOverHTTP]
-   [org.eclipse.jetty.client.util ByteBufferContentProvider]
-   [org.eclipse.jetty.http HttpFields]
+   [org.eclipse.jetty.client HttpClient Socks4Proxy
+                             Request Response Result
+                             Response$CompleteListener Response$HeadersListener Response$ContentListener
+                             Response$FailureListener]
+   [org.eclipse.jetty.client.transport HttpClientTransportOverHTTP]
+   [org.eclipse.jetty.client ByteBufferRequestContent]
+   [org.eclipse.jetty.http HttpFields HttpFields$Mutable]
    [org.eclipse.jetty.io ClientConnector]
-   [org.eclipse.jetty.util.resource Resource]
    [org.eclipse.jetty.util.ssl SslContextFactory SslContextFactory$Client]))
 
 (set! *warn-on-reflection* true)
@@ -105,18 +105,17 @@
               (.scheme (name scheme))
               (.path ^String (if query-string
                                (str uri "?" query-string)
-                               uri)))
-        req (reduce-kv
-             (fn [^Request req k v]
-               (.header req ^String (name k) ^String v))
-             req
-             headers)
+                               uri))
+              (.headers (reify java.util.function.Consumer
+                          (accept [_ mf]
+                            (doseq [[k v] headers]
+                              (.put ^HttpFields$Mutable mf (name k) (str v)))))))
         req (if-let [to (::timeout-msec m)]
               (.timeout ^Request req to TimeUnit/MILLISECONDS)
               req)]
     (if body
-      (.content ^Request req
-        (ByteBufferContentProvider. (into-array [(.duplicate ^ByteBuffer body)])))
+      (.body ^Request req
+        (ByteBufferRequestContent. (into-array [(.duplicate ^ByteBuffer body)])))
       req)))
 
 (defn- format-headers [^HttpFields jetty-headers]
@@ -288,7 +287,7 @@ On error, response map is per cognitect.anomalies"
     (when trust-store
       (.setTrustStore factory trust-store))
     (when classpath-trust-store
-      (.setTrustStoreResource factory (Resource/newClassPathResource classpath-trust-store)))
+      (.setTrustStorePath factory (str (io/resource classpath-trust-store))))
     (when trust-store-password
       (.setTrustStorePassword factory trust-store-password))
     factory))
@@ -360,3 +359,21 @@ On error, response map is per cognitect.anomalies"
 open."
   [^Client client]
   (.stop ^HttpClient (.-jetty_client client)))
+
+(comment
+  (let [c (create {})]
+    (try
+      (-> (map->jetty-request (.-jetty-client c) {:server-name "foo"
+                                                  :server-port 8080
+                                                  :uri "path"
+                                                  :request-method :patch
+                                                  :headers {:foo "Bar"
+                                                            :users-agent "mine"}})
+          .getHeaders
+          .iterator
+          iterator-seq
+          (->> (map str)))
+      (finally (stop c))))
+
+  (ssl-context-factory {:classpath-trust-store "cognitect/http_client.clj"})
+  )
